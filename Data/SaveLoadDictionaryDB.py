@@ -1,19 +1,29 @@
-
 import pickle
 from typing import Any
 import os
+from pathlib import Path
+
+
+DEFAULT_DATAFILES_DIR = Path(__file__).resolve().parents[1] / "Datafiles"
+
+
+def _resolve_database_directory(directory: str | Path | None) -> Path:
+    if directory is None:
+        return DEFAULT_DATAFILES_DIR
+    return Path(directory)
 
 def load_dictionary_database(
-    directory: str = r"MetaLearner\Datafiles",
+    directory: str | Path | None = None,
     filename: str = "mean_reversion_base_feature_database.pkl",
 ) -> Any:
     """
     Load dictionary database from `directory/filename` if it exists.
     If not found, create an empty dict file and return {}.
     """
-    os.makedirs(directory, exist_ok=True)
-    file_path = os.path.join(directory, filename)
-    if os.path.isfile(file_path):
+    database_dir = _resolve_database_directory(directory)
+    os.makedirs(database_dir, exist_ok=True)
+    file_path = database_dir / filename
+    if file_path.is_file():
         print(f"Database found: {file_path}")
         with open(file_path, "rb") as f:
             return pickle.load(f)
@@ -26,7 +36,7 @@ def load_dictionary_database(
 
 def save_dictionary_database(
     database: Any,
-    directory: str = r"MetaLearner\Datafiles",
+    directory: str | Path | None = None,
     filename: str = "mean_reversion_base_feature_database.pkl",
 ) -> str:
     """
@@ -38,8 +48,9 @@ def save_dictionary_database(
     str
         Full path of the saved pickle file.
     """
-    os.makedirs(directory, exist_ok=True)
-    file_path = os.path.join(directory, filename)
+    database_dir = _resolve_database_directory(directory)
+    os.makedirs(database_dir, exist_ok=True)
+    file_path = database_dir / filename
     with open(file_path, "wb") as f:
         pickle.dump(database, f, protocol=pickle.HIGHEST_PROTOCOL)
-    return file_path
+    return str(file_path)
