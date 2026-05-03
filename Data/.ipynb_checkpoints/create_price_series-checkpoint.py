@@ -116,6 +116,8 @@ ETF_TICKERS = [
 
 SP500_TICKER = ['^GSPC']
 
+temp_tickers = ['CHRW', 'EHC', 'DHI', 'LW', 'FAST', 'THG', 'ATO', 'TGT', 'WCC', 'AMG']
+
 def download_daily_data(ticker: str, start: str = "2018-01-01") -> pd.DataFrame | None:
     """Download daily OHLCV data for a ticker from Yahoo Finance."""
     try:
@@ -128,7 +130,7 @@ def download_daily_data(ticker: str, start: str = "2018-01-01") -> pd.DataFrame 
 
 
 def create_price_series_csv(
-    output_path: str | Path = "all_daily_adjusted_close.csv",
+    output_path: str | Path | None = None,
     start_date: str = "2018-01-01",
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -138,8 +140,9 @@ def create_price_series_csv(
 
     Parameters
     ----------
-    output_path : str or Path
-        Path for the output CSV file.
+    output_path : str or Path or None
+        Path for the output CSV file. If None, saves to
+        MetaLearner/Datafiles/all_daily_adjusted_close.csv.
     start_date : str
         Start date for historical data (YYYY-MM-DD).
     verbose : bool
@@ -151,8 +154,10 @@ def create_price_series_csv(
         The combined price data (Volume + Close per ticker).
     """
     stock_tickers = SP500_TICKERS + SP_MIDCAP_400_TICKERS
-    tickers =  stock_tickers[:10] + ETF_TICKERS + SP500_TICKER
+    tickers =  stock_tickers + ETF_TICKERS + SP500_TICKER
 
+    tickers = ['CHRW', 'EHC', 'DHI', 'LW', 'FAST', 'THG', 'ATO', 'TGT', 'WCC', 'AMG'] + ETF_TICKERS + SP500_TICKER
+    
     data = {}
     for ticker in tickers:
         if verbose:
@@ -180,7 +185,12 @@ def create_price_series_csv(
     train_data.columns = train_data.columns.droplevel(0)
     train_data.columns.values[0] = "Date"
 
-    output_path = Path(output_path)
+    if output_path is None:
+        output_path = Path(__file__).resolve().parents[1] / "Datafiles" / "all_daily_adjusted_close.csv"
+    else:
+        output_path = Path(output_path)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     train_data.to_csv(output_path, index=False)
     if verbose:
         print(f"\nSaved {len(train_data)} rows to {output_path}")

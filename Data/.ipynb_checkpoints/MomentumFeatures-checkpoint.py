@@ -61,14 +61,26 @@ def fill_missing_correlation_coefficients(available_AR_values_per_stock : dict,
 
     data = available_AR_values_per_stock[ticker][lag_fut_combo]
 
-    for date in p.index:
+    # for date in p.index:
+    for i, date in enumerate(p.index):
         if date not in data:
-            ret_lag_sub = ret_lag.loc[:date]
-            ret_fut_sub = ret_fut.loc[:date]
+            # Match original notebook logic: train strictly before current date.
+            # ret_lag_sub = ret_lag.loc[:date]
+            # ret_fut_sub = ret_fut.loc[:date]
+            ret_lag_sub = ret_lag.iloc[:i]
+            ret_fut_sub = ret_fut.iloc[:i]
 
             r, pv = create_auto_correlation_forecast(ret_lag_sub, ret_fut_sub, 
                                      lookback, holddays,3)
-            data[date] = [r, pv] 
+
+            # data[date] = [r, pv] 
+            
+            # Match original notebook: forecast_ret_{lookback} = corr * ret_lag_at_trade_date
+            ret_lag_today = ret_lag.iloc[i] if i < len(ret_lag) else np.nan
+            forecast_ret_today = r * ret_lag_today if not (np.isnan(r) or np.isnan(ret_lag_today)) else np.nan
+            data[date] = [forecast_ret_today, pv]
+        
+            
 
 
 def create_compressed_forecast_features(temp_feat_df):
@@ -117,8 +129,6 @@ def create_compressed_forecast_features(temp_feat_df):
 def popolute_momentum_data(price_data: pd.DataFrame, available_AR_values_per_stock: dict,
                           LOOKBACKS: list,
                           selected_tickers: list):
-
-    LOOKBACKS = [1, 5, 10, 25, 60, 120, 250]
     
     for ticker in selected_tickers:
         print(ticker)

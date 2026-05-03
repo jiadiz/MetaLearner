@@ -185,6 +185,11 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
         data = available_mean_reversion_features_per_ticker[ticker][mean_reversion_type]
         return data
 
+    if series_type == 'return':
+        p =  np.log(p / p.shift(1)).copy()
+        etf_p=  np.log(etf_p / etf_p.shift(1)).copy()
+        sp500_p =  np.log(sp500_p / sp500_p.shift(1)).copy()
+    
     ticker = ticker
 
     sector_type = 'sector'
@@ -251,7 +256,7 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
     else:
         return_or_price = 'return'
 
-    ticker_base_variables = available_mean_reversion_features_per_ticker['MMM']
+    # ticker_base_variables = available_mean_reversion_features_per_ticker['MMM']
 
     df = pd.DataFrame()
 
