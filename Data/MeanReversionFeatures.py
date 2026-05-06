@@ -186,9 +186,15 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
         return data
 
     if series_type == 'return':
-        p =  np.log(p / p.shift(1)).copy()
-        etf_p=  np.log(etf_p / etf_p.shift(1)).copy()
-        sp500_p =  np.log(sp500_p / sp500_p.shift(1)).copy()
+        p = np.log(p / p.shift(1)).copy()
+        etf_p = np.log(etf_p / etf_p.shift(1)).copy()
+        sp500_p = np.log(sp500_p / sp500_p.shift(1)).copy()
+
+        # Align all return series to one shared valid timeline.
+        common_idx = p.dropna().index.intersection(etf_p.dropna().index).intersection(sp500_p.dropna().index)
+        p = p.loc[common_idx]
+        etf_p = etf_p.loc[common_idx]
+        sp500_p = sp500_p.loc[common_idx]
     
     ticker = ticker
 
@@ -199,7 +205,14 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
     data = identify_ticker_feature_location(available_mean_reversion_features_per_ticker, ticker, mean_reversion_type)
 
     for date in p.index:
-        if date not in data:
+        # Backfill older cached entries that were written before resid_forecast was stored.
+        existing = data.get(date)
+        needs_backfill = (
+            isinstance(existing, dict)
+            and 'y_today' in existing
+            and 'resid_forecast' not in existing
+        )
+        if (date not in data) or needs_backfill:
             data[date] = {}
             pos = p.index.get_loc(date)
             p_sub = p.iloc[max(0, pos-lookback): pos+1] 
@@ -225,7 +238,14 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
     data = identify_ticker_feature_location(available_mean_reversion_features_per_ticker, ticker, mean_reversion_type)
 
     for date in p.index:
-        if date not in data:
+        # Backfill older cached entries that were written before resid_forecast was stored.
+        existing = data.get(date)
+        needs_backfill = (
+            isinstance(existing, dict)
+            and 'y_today' in existing
+            and 'resid_forecast' not in existing
+        )
+        if (date not in data) or needs_backfill:
             data[date] = {}
             pos = p.index.get_loc(date)
             p_sub = p.iloc[max(0, pos-lookback): pos+1] 
@@ -275,6 +295,9 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
 
             resid = pd.Series(available_mean_reversion_features_per_ticker[ticker][f'mean_reversion_{econ_or_sector}_{return_or_price}_d{window }']).apply(lambda x: x['resid_today'] if 'resid_today' in x else np.nan)
 
+            # AR(1)-based 21-step-ahead residual forecast (matches ground truth notebook).
+            resid_forecast = pd.Series(available_mean_reversion_features_per_ticker[ticker][f'mean_reversion_{econ_or_sector}_{return_or_price}_d{window }']).apply(lambda x: x['resid_forecast'] if isinstance(x, dict) and 'resid_forecast' in x else np.nan)
+
             # print(adf_p)
 
             if window >= 252:
@@ -296,7 +319,8 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
 
             if window >= 252:
                 res_mom_12_1 = resid.expanding().apply(lambda x: residual_momentum(x, length=MOM_12_LEN, skip=MOM_12_SKIP))
-                res_mom_long_1 = res_mom_06_1
+                # Long windows should use 12-1 residual momentum.
+                res_mom_long_1 = res_mom_12_1
 
             else:
                 res_mom_06_1 = resid.expanding().apply(lambda x: residual_momentum(x, length=MOM_06_LEN, skip=MOM_12_SKIP))
@@ -355,6 +379,8 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
                 df[f'{econ_or_sector}_{r_or_p}_macd_line_{window }'] = macd_line/stock_price
                 df[f'{econ_or_sector}_{r_or_p}_macd_signal_{window }'] = macd_signal/stock_price
                 df[f'{econ_or_sector}_{r_or_p}_macd_hist_{window }'] = macd_hist/stock_price
+                # 21-step AR(1) residual forecast, price-adjusted to match ground truth notebook.
+                df[f'{econ_or_sector}_{r_or_p}_resid_forecast_{window}'] = resid_forecast / stock_price
             elif is_price_series == False:
 
                 D = window
@@ -382,6 +408,8 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
                 df[f'{econ_or_sector}_{r_or_p}_macd_line_{window }'] = macd_line
                 df[f'{econ_or_sector}_{r_or_p}_macd_signal_{window }'] = macd_signal
                 df[f'{econ_or_sector}_{r_or_p}_macd_hist_{window }'] = macd_hist
+                # 21-step AR(1) residual forecast in return-space (matches ground truth notebook).
+                df[f'{econ_or_sector}_{r_or_p}_resid_forecast_{window}'] = resid_forecast
 
     return df
 

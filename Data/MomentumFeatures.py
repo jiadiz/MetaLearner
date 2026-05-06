@@ -61,26 +61,84 @@ def fill_missing_correlation_coefficients(available_AR_values_per_stock : dict,
 
     data = available_AR_values_per_stock[ticker][lag_fut_combo]
 
-    # for date in p.index:
     for i, date in enumerate(p.index):
-        if date not in data:
+        existing_val = data.get(date, None)
+        needs_backfill = not (
+            isinstance(existing_val, (list, tuple))
+            and len(existing_val) >= 4
+        )
+
+        if date not in data or needs_backfill:
             # Match original notebook logic: train strictly before current date.
-            # ret_lag_sub = ret_lag.loc[:date]
-            # ret_fut_sub = ret_fut.loc[:date]
             ret_lag_sub = ret_lag.iloc[:i]
             ret_fut_sub = ret_fut.iloc[:i]
 
             r, pv = create_auto_correlation_forecast(ret_lag_sub, ret_fut_sub, 
                                      lookback, holddays,3)
 
-            # data[date] = [r, pv] 
-            
             # Match original notebook: forecast_ret_{lookback} = corr * ret_lag_at_trade_date
             ret_lag_today = ret_lag.iloc[i] if i < len(ret_lag) else np.nan
             forecast_ret_today = r * ret_lag_today if not (np.isnan(r) or np.isnan(ret_lag_today)) else np.nan
-            data[date] = [forecast_ret_today, pv]
+            # Stored order:
+            # [forecast_ret, pval, corr_expanding_indep, ret_lag]
+            # Keep first two slots unchanged for backward compatibility.
+            data[date] = [forecast_ret_today, pv, r, ret_lag_today]
         
             
+
+
+def create_momentum_feature_variants(
+    available_AR_values_per_stock: dict,
+    ticker: str,
+    lookbacks: list,
+    holddays: int = 21,
+) -> pd.DataFrame:
+    """
+    Materialize momentum dictionary content to a feature dataframe.
+    Includes:
+      - forecast_ret_{lookback}
+      - pval_expanding_indep_{lookback}
+      - corr_expanding_indep_{lookback}
+      - ret_lag_{lookback}
+      - forecast_s_times_1_minus_pval_{lookback}
+    """
+    if ticker not in available_AR_values_per_stock:
+        return pd.DataFrame()
+
+    index_values = set()
+    for lookback in lookbacks:
+        combo = f"lag_{lookback}_hold_{holddays}"
+        if combo in available_AR_values_per_stock[ticker]:
+            index_values.update(available_AR_values_per_stock[ticker][combo].keys())
+
+    if not index_values:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(index=pd.Index(sorted(index_values), name="Date"))
+
+    def _safe_get(item, pos):
+        if isinstance(item, (list, tuple)) and len(item) > pos:
+            return item[pos]
+        return np.nan
+
+    for lookback in lookbacks:
+        combo = f"lag_{lookback}_hold_{holddays}"
+        if combo not in available_AR_values_per_stock[ticker]:
+            continue
+
+        series = pd.Series(available_AR_values_per_stock[ticker][combo])
+        forecast = series.apply(lambda x: _safe_get(x, 0))
+        pval = series.apply(lambda x: _safe_get(x, 1))
+        corr = series.apply(lambda x: _safe_get(x, 2))
+        ret_lag = series.apply(lambda x: _safe_get(x, 3))
+
+        df[f"forecast_ret_{lookback}"] = forecast
+        df[f"pval_expanding_indep_{lookback}"] = pval
+        df[f"corr_expanding_indep_{lookback}"] = corr
+        df[f"ret_lag_{lookback}"] = ret_lag
+        df[f"forecast_s_times_1_minus_pval_{lookback}"] = forecast * (1 - pval)
+
+    return df
 
 
 def create_compressed_forecast_features(temp_feat_df):
