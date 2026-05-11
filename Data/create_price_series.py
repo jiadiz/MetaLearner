@@ -116,7 +116,7 @@ ETF_TICKERS = [
 
 SP500_TICKER = ['^GSPC']
 
-temp_tickers = ['CHRW', 'EHC', 'DHI', 'LW', 'FAST', 'THG', 'ATO', 'TGT', 'WCC', 'AMG']
+# temp_tickers = ['CHRW', 'EHC', 'DHI', 'LW', 'FAST', 'THG', 'ATO', 'TGT', 'WCC', 'AMG']
 
 def download_daily_data(ticker: str, start: str = "2018-01-01") -> pd.DataFrame | None:
     """Download daily OHLCV data for a ticker from Yahoo Finance."""
@@ -156,7 +156,7 @@ def create_price_series_csv(
     stock_tickers = SP500_TICKERS + SP_MIDCAP_400_TICKERS
     tickers =  stock_tickers + ETF_TICKERS + SP500_TICKER
 
-    tickers = ['CHRW', 'EHC', 'DHI', 'LW', 'FAST', 'THG', 'ATO', 'TGT', 'WCC', 'AMG'] + ETF_TICKERS + SP500_TICKER
+    # tickers = ['CHRW', 'EHC', 'DHI', 'LW', 'FAST', 'THG', 'ATO', 'TGT', 'WCC', 'AMG'] + ETF_TICKERS + SP500_TICKER
     
     data = {}
     for ticker in tickers:

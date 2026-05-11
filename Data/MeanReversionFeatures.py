@@ -173,15 +173,18 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
                                          ticker: str,
                                          series_type: str,
                                          lookback: int,
+                                         verbose: bool = False,
                                          ):
 
     def identify_ticker_feature_location(available_mean_reversion_features_per_ticker, ticker, mean_reversion_type):
         if ticker not in available_mean_reversion_features_per_ticker:
             available_mean_reversion_features_per_ticker[ticker] = {}
-            print(f'{ticker} data created')
+            if verbose:
+                print(f'{ticker} data created')
         if  mean_reversion_type not in available_mean_reversion_features_per_ticker[ticker]:
             available_mean_reversion_features_per_ticker[ticker][mean_reversion_type] = {}
-            print(f'{ticker} {mean_reversion_type} data created')
+            if verbose:
+                print(f'{ticker} {mean_reversion_type} data created')
         data = available_mean_reversion_features_per_ticker[ticker][mean_reversion_type]
         return data
 
@@ -204,7 +207,8 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
 
     data = identify_ticker_feature_location(available_mean_reversion_features_per_ticker, ticker, mean_reversion_type)
 
-    for date in p.index:
+    # Iterate positionally to avoid an O(log n)-ish get_loc per date.
+    for pos, date in enumerate(p.index):
         # Backfill older cached entries that were written before resid_forecast was stored.
         existing = data.get(date)
         needs_backfill = (
@@ -213,32 +217,35 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
             and 'resid_forecast' not in existing
         )
         if (date not in data) or needs_backfill:
-            data[date] = {}
-            pos = p.index.get_loc(date)
-            p_sub = p.iloc[max(0, pos-lookback): pos+1] 
-            etf_p_sub = etf_p.iloc[max(0, pos-lookback): pos+1] 
+            p_sub = p.iloc[max(0, pos-lookback): pos+1]
+            etf_p_sub = etf_p.iloc[max(0, pos-lookback): pos+1]
             if p_sub.shape[0] < lookback+1:
                 continue
             y_today, beta, adf_p, z_score_today, resid_std, resid_today, resid_forecast, resid_forecasted_change = create_residual_mean_reversion_features(p_sub,
                                         etf_p_sub )
 
-            data[date]['y_today'] = y_today
-            data[date]['beta'] = beta
-            data[date]['adf_p'] = adf_p
-            data[date]['z_score_today'] = z_score_today
-            data[date]['resid_std'] = resid_std
-            data[date]['resid_today'] = resid_today
-            data[date]['resid_forecast'] = resid_forecast
-            data[date]['resid_forecasted_change'] = resid_forecasted_change
-            print(date, f'{mean_reversion_type} data created')
+            # Single dict allocation with all fields populated up-front is cheaper
+            # than `data[date] = {}` followed by eight `data[date][k] = v` assigns.
+            data[date] = {
+                'y_today': y_today,
+                'beta': beta,
+                'adf_p': adf_p,
+                'z_score_today': z_score_today,
+                'resid_std': resid_std,
+                'resid_today': resid_today,
+                'resid_forecast': resid_forecast,
+                'resid_forecasted_change': resid_forecasted_change,
+            }
+    if verbose:
+        print('Data until ', p.index[-1], f'{mean_reversion_type} data created')
+
     sector_type = 'econ'
 
     mean_reversion_type = f'mean_reversion_{sector_type}_{series_type}_d{lookback}'
 
     data = identify_ticker_feature_location(available_mean_reversion_features_per_ticker, ticker, mean_reversion_type)
 
-    for date in p.index:
-        # Backfill older cached entries that were written before resid_forecast was stored.
+    for pos, date in enumerate(p.index):
         existing = data.get(date)
         needs_backfill = (
             isinstance(existing, dict)
@@ -246,25 +253,26 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
             and 'resid_forecast' not in existing
         )
         if (date not in data) or needs_backfill:
-            data[date] = {}
-            pos = p.index.get_loc(date)
-            p_sub = p.iloc[max(0, pos-lookback): pos+1] 
-            sp500_p_sub = sp500_p.iloc[max(0, pos-lookback): pos+1] 
+            p_sub = p.iloc[max(0, pos-lookback): pos+1]
+            sp500_p_sub = sp500_p.iloc[max(0, pos-lookback): pos+1]
             if p_sub.shape[0] < lookback+1:
                 continue
 
             y_today, beta, adf_p, z_score_today, resid_std, resid_today, resid_forecast, resid_forecasted_change = create_residual_mean_reversion_features(p_sub,
                                         sp500_p_sub )
 
-            data[date]['y_today'] = y_today
-            data[date]['beta'] = beta
-            data[date]['adf_p'] = adf_p
-            data[date]['z_score_today'] = z_score_today
-            data[date]['resid_std'] = resid_std
-            data[date]['resid_today'] = resid_today
-            data[date]['resid_forecast'] = resid_forecast
-            data[date]['resid_forecasted_change'] = resid_forecasted_change
-            print(date, f'{mean_reversion_type} data created')
+            data[date] = {
+                'y_today': y_today,
+                'beta': beta,
+                'adf_p': adf_p,
+                'z_score_today': z_score_today,
+                'resid_std': resid_std,
+                'resid_today': resid_today,
+                'resid_forecast': resid_forecast,
+                'resid_forecasted_change': resid_forecasted_change,
+            }
+    if verbose:
+        print('Data until ', p.index[-1], f'{mean_reversion_type} data created')
 # create_residual_mean_reversion_features(np.log(price_data['MMM_Close'] / price_data['MMM_Close'].shift(1)).copy(),
 #                                         np.log(price_data['XLI_Close'] / price_data['XLI_Close'].shift(1)).copy())
 
