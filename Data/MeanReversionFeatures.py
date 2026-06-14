@@ -78,27 +78,45 @@ def update_ema(prev_ema, new_value, alpha):
     return alpha * new_value + (1.0 - alpha) * prev_ema
 
 
-def fit_ar1(y: pd.Series):
+def _simple_ols(x: np.ndarray, y: np.ndarray):
     """
-    Fit AR(1): y_t = alpha + beta * y_{t-1} + eps
-    Returns (alpha, beta).
+    Closed-form OLS for y = intercept + beta * x, where x and y are 1-D
+    numpy arrays of the same length. Returns (intercept, beta).
+
+    Mathematically equivalent (to float precision) to
+    ``LinearRegression().fit(x.reshape(-1, 1), y)``, but skips all of
+    sklearn's per-call estimator setup / input-validation overhead. That
+    overhead dwarfs the actual linear-algebra work for the small windows
+    used here (typ. 126 / 252 / 504), so this is the single largest
+    speedup in the per-date hot loop.
+
+    If x has zero variance (degenerate window), returns (nan, nan).
     """
-    y = pd.Series(y).dropna()
-    if len(y) < 3:
+    x_mean = x.mean()
+    y_mean = y.mean()
+    x_centered = x - x_mean
+    denom = float((x_centered * x_centered).sum())
+    if denom == 0.0 or not np.isfinite(denom):
         return np.nan, np.nan
+    beta = float((x_centered * (y - y_mean)).sum() / denom)
+    intercept = float(y_mean - beta * x_mean)
+    return intercept, beta
 
-    y_lag = y.shift(1).dropna()
-    y_now = y.loc[y_lag.index]
 
-    X = y_lag.values.reshape(-1, 1)
-    Y = y_now.values
+def fit_ar1(y):
+    """
+    Fit AR(1): y_t = alpha + beta * y_{t-1} + eps.
+    Returns (alpha, beta).
 
-    lr = LinearRegression()
-    lr.fit(X, Y)
-
-    alpha = float(lr.intercept_)
-    beta = float(lr.coef_[0])
-    return alpha, beta
+    Accepts a numpy array or pandas Series; NaNs are dropped before
+    fitting (consistent with the previous sklearn-based implementation).
+    Internally uses closed-form OLS via _simple_ols.
+    """
+    y_arr = np.asarray(y, dtype=float).ravel()
+    y_arr = y_arr[~np.isnan(y_arr)]
+    if len(y_arr) < 3:
+        return np.nan, np.nan
+    return _simple_ols(y_arr[:-1], y_arr[1:])
 
 def forecast_k_steps_ar1(alpha: float,
                          beta: float,
@@ -114,56 +132,76 @@ def forecast_k_steps_ar1(alpha: float,
     y_forecast = mu + (beta ** k) * (y_t - mu)
     return float(y_forecast)
 
-def create_residual_mean_reversion_features(
-                                            stock_series: pd.Series, 
-                                     the_other_stock_series: pd.Series):
-    y = stock_series.dropna()
-    X = the_other_stock_series.dropna().values.reshape(-1, 1)
+def create_residual_mean_reversion_features(y_arr: np.ndarray,
+                                            x_arr: np.ndarray):
+    """
+    One-feature OLS of y on x using all but the last observation
+    (the "training window"), then derive residual-based diagnostics
+    (std, ADF p-value, today's residual + z-score, AR(1)-based
+    21-step-ahead residual forecast).
 
-    X_train = X[:-1, :]
-    y_train = y.iloc[:-1]
+    Parameters
+    ----------
+    y_arr, x_arr : np.ndarray
+        1-D numpy arrays of identical length (typically ``lookback + 1``).
+        The last element is "today"; everything before is the regression
+        window. NaNs are jointly dropped before fitting, mirroring the
+        previous pd.Series.dropna() behavior but tolerant of NaNs in
+        either array.
 
-    X_today = X[[-1]]
-    y_today = y.iloc[-1]
+    Returns
+    -------
+    8-tuple of floats:
+        (y_today, pair_beta, adf_pval, z_score_today, resid_std,
+         resid_today, resid_forecast, resid_forecasted_change)
+    """
+    y_arr = np.asarray(y_arr, dtype=float).ravel()
+    x_arr = np.asarray(x_arr, dtype=float).ravel()
+    mask = ~(np.isnan(y_arr) | np.isnan(x_arr))
+    y_arr = y_arr[mask]
+    x_arr = x_arr[mask]
 
-    lm = LinearRegression()
+    if len(y_arr) < 3:
+        nan = np.nan
+        return nan, nan, nan, nan, nan, nan, nan, nan
 
-    lm.fit(X_train, y_train)
+    x_train = x_arr[:-1]
+    y_train = y_arr[:-1]
+    x_today = x_arr[-1]
+    y_today = float(y_arr[-1])
 
-    pair_beta = lm.coef_[0]
+    intercept, pair_beta = _simple_ols(x_train, y_train)
+    if np.isnan(pair_beta):
+        nan = np.nan
+        return y_today, nan, nan, nan, nan, nan, nan, nan
 
     # residuals in the window (for std & ADF)
-    y_pred = lm.predict(X_train)
-    residuals = y_train - y_pred
+    residuals = y_train - (intercept + pair_beta * x_train)
 
+    # std of residuals (sample std, ddof=1)
+    std = float(residuals.std(ddof=1))
 
-    # std of residuals (sample std)
-    std = residuals.std(ddof=1)
+    # today's residual (one-step ahead) using today's x, y
+    resid_today = float(y_today - (intercept + pair_beta * x_today))
 
-    # today's residual (one-step ahead) using today's x,y
-    resid_today = y_today - lm.predict(X_today)[0]
+    z_score_today = resid_today / std if std != 0.0 else np.nan
 
-    # z-score of today's residual
-    z_score_today = resid_today / std if std != 0 else np.nan
-
-    # ADF p-value on window residuals
+    # ADF p-value on window residuals (kept identical to prior version)
     try:
-        adf_res = adfuller(residuals, autolag='AIC')
-        adf_pval = adf_res[1]   # p-value
+        adf_pval = float(adfuller(residuals, autolag='AIC')[1])
     except Exception:
-        adf_pval = np.nan       # too short / numerical issue
+        adf_pval = np.nan
 
-    # ---- residual-based momentum / reversal / RSI / streak ----
-    alpha, resid_beta = fit_ar1(residuals)
-    # print(alpha, resid_beta)
-    resid_forecast = forecast_k_steps_ar1(alpha,
-                         resid_beta,
-                         resid_today,
-                         k = 21+1)
-
+    # AR(1)-based 21-step-ahead residual forecast
+    ar1_alpha, ar1_beta = fit_ar1(residuals)
+    resid_forecast = forecast_k_steps_ar1(ar1_alpha,
+                                          ar1_beta,
+                                          resid_today,
+                                          k=21 + 1)
     resid_forecasted_change = resid_forecast - resid_today
 
-    return y_today, pair_beta, adf_pval, z_score_today, std, resid_today, resid_forecast, resid_forecasted_change
+    return (y_today, float(pair_beta), adf_pval, z_score_today, std,
+            resid_today, resid_forecast, resid_forecasted_change)
 
 
 def fill_missing_mean_reversion_features(available_mean_reversion_features_per_ticker: dict,
@@ -198,7 +236,15 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
         p = p.loc[common_idx]
         etf_p = etf_p.loc[common_idx]
         sp500_p = sp500_p.loc[common_idx]
-    
+
+    # Convert to raw numpy once. The per-date hot loops below slice these
+    # arrays as O(1) views instead of building a fresh pandas Series +
+    # DatetimeIndex slice per date.
+    p_arr     = p.values
+    etf_arr   = etf_p.values
+    sp500_arr = sp500_p.values
+    dates     = p.index
+
     ticker = ticker
 
     sector_type = 'sector'
@@ -217,12 +263,14 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
             and 'resid_forecast' not in existing
         )
         if (date not in data) or needs_backfill:
-            p_sub = p.iloc[max(0, pos-lookback): pos+1]
-            etf_p_sub = etf_p.iloc[max(0, pos-lookback): pos+1]
-            if p_sub.shape[0] < lookback+1:
+            start = max(0, pos - lookback)
+            y_win = p_arr[start: pos + 1]
+            x_win = etf_arr[start: pos + 1]
+            if len(y_win) < lookback + 1:
                 continue
-            y_today, beta, adf_p, z_score_today, resid_std, resid_today, resid_forecast, resid_forecasted_change = create_residual_mean_reversion_features(p_sub,
-                                        etf_p_sub )
+            (y_today, beta, adf_p, z_score_today, resid_std,
+             resid_today, resid_forecast,
+             resid_forecasted_change) = create_residual_mean_reversion_features(y_win, x_win)
 
             # Single dict allocation with all fields populated up-front is cheaper
             # than `data[date] = {}` followed by eight `data[date][k] = v` assigns.
@@ -253,13 +301,15 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
             and 'resid_forecast' not in existing
         )
         if (date not in data) or needs_backfill:
-            p_sub = p.iloc[max(0, pos-lookback): pos+1]
-            sp500_p_sub = sp500_p.iloc[max(0, pos-lookback): pos+1]
-            if p_sub.shape[0] < lookback+1:
+            start = max(0, pos - lookback)
+            y_win = p_arr[start: pos + 1]
+            x_win = sp500_arr[start: pos + 1]
+            if len(y_win) < lookback + 1:
                 continue
 
-            y_today, beta, adf_p, z_score_today, resid_std, resid_today, resid_forecast, resid_forecasted_change = create_residual_mean_reversion_features(p_sub,
-                                        sp500_p_sub )
+            (y_today, beta, adf_p, z_score_today, resid_std,
+             resid_today, resid_forecast,
+             resid_forecasted_change) = create_residual_mean_reversion_features(y_win, x_win)
 
             data[date] = {
                 'y_today': y_today,
@@ -519,3 +569,62 @@ def concat_mean_reversion_dataframes(
 
     ml_training_df = pd.concat(all_ticker_dfs, axis=0, ignore_index=False)
     return ml_training_df
+
+
+def compute_mean_reversion_for_ticker(
+    ticker: str,
+    p: pd.Series,
+    etf_p: pd.Series,
+    sp500_p: pd.Series,
+    windows: list,
+    existing_ticker_data: dict = None,
+):
+    """
+    Stateless per-ticker worker designed for joblib.Parallel(backend='loky').
+
+    Takes the optional existing cache slice for `ticker` (typically
+    available_mean_reversion_features_per_ticker.get(ticker)), fills in any
+    dates that are missing for each (window, series_type) pair via the
+    existing fill_missing_mean_reversion_features logic, and returns the
+    updated slice along with the 'vannila' mean reversion DataFrame.
+
+    Parameters
+    ----------
+    ticker : str
+        The stock ticker.
+    p, etf_p, sp500_p : pd.Series
+        Daily price series for the stock, its sector ETF, and the S&P 500
+        proxy. Indexed by date.
+    windows : list[int]
+        Rolling window sizes to populate (e.g. [126, 252, 504]).
+    existing_ticker_data : dict or None
+        The existing cache slice for this ticker. Pass None or {} for a
+        first-time / cold-cache computation. May be mutated in-place; the
+        caller should pass a copy if it needs to preserve the original.
+        Under loky, the input is already pickled across the process
+        boundary so in-place mutation is harmless to the parent.
+
+    Returns
+    -------
+    ticker : str
+        Echoed back to make merging in the parent unambiguous.
+    updated_ticker_data : dict
+        New cache slice. Caller should set
+        ``available_mean_reversion_features_per_ticker[ticker] = updated_ticker_data``.
+    vannila_df : pd.DataFrame
+        Output of build_other_mean_reversion_features(p, etf_p, sp500_p).
+    """
+    local: dict = {}
+    if existing_ticker_data:
+        local[ticker] = existing_ticker_data
+
+    for window in windows:
+        fill_missing_mean_reversion_features(
+            local, p, etf_p, sp500_p, ticker, 'price', window
+        )
+        fill_missing_mean_reversion_features(
+            local, p, etf_p, sp500_p, ticker, 'return', window
+        )
+
+    vannila_df = build_other_mean_reversion_features(p, etf_p, sp500_p)
+    return ticker, local.get(ticker, {}), vannila_df
