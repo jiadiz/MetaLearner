@@ -121,19 +121,45 @@ def fit_ar1(y):
 def forecast_k_steps_ar1(alpha: float,
                          beta: float,
                          y_t: float,
-                         k: int = 21) -> float:
+                         k: int = 21):
+    """
+    AR(1) forecast helpers computed in a single pass. Returns a 2-tuple:
 
-    # Handle beta ~ 1 (near unit root)
+        (y_forecast, y_forecast_sum)
+
+    where, with mu = alpha / (1 - beta) and y_{t+j} = mu + beta**j * (y_t - mu):
+
+      * y_forecast     = y_{t+k}                      (single k-step-ahead level)
+                       = mu + beta**k * (y_t - mu)
+      * y_forecast_sum = sum_{j=1}^{k} y_{t+j}        (cumulative path over k steps)
+                       = k*mu + (y_t - mu) * beta*(1 - beta**k)/(1 - beta)
+
+    The point forecast is the right target for a *level* residual (e.g. a
+    price-deviation): where the level sits k steps out. The cumulative sum is
+    the right target for a *flow* residual (e.g. a daily log-return): the
+    expected cumulative idiosyncratic return over a k-day holding horizon.
+    Both share the same mu / beta**k so they are produced together.
+
+    Near a unit root (beta ~ 1) we fall back to the random-walk-with-drift
+    approximation y_{t+j} ~ y_t + j*alpha:
+        y_forecast     ~ y_t + k*alpha
+        y_forecast_sum ~ k*y_t + alpha * k*(k+1)/2
+    """
     if abs(1.0 - beta) < 1e-12:
-        # Roughly: y_{t+k} ≈ y_t + k*alpha
-        return y_t + k * alpha
+        y_forecast = y_t + k * alpha
+        y_forecast_sum = k * y_t + alpha * k * (k + 1) / 2.0
+        return float(y_forecast), float(y_forecast_sum)
 
     mu = alpha / (1.0 - beta)
-    y_forecast = mu + (beta ** k) * (y_t - mu)
-    return float(y_forecast)
+    beta_k = beta ** k
+    y_forecast = mu + beta_k * (y_t - mu)
+    geom = beta * (1.0 - beta_k) / (1.0 - beta)
+    y_forecast_sum = k * mu + (y_t - mu) * geom
+    return float(y_forecast), float(y_forecast_sum)
 
 def create_residual_mean_reversion_features(y_arr: np.ndarray,
-                                            x_arr: np.ndarray):
+                                            x_arr: np.ndarray,
+                                            forecast_horizon: int = 21):
     """
     One-feature OLS of y on x using all but the last observation
     (the "training window"), then derive residual-based diagnostics
@@ -148,12 +174,19 @@ def create_residual_mean_reversion_features(y_arr: np.ndarray,
         window. NaNs are jointly dropped before fitting, mirroring the
         previous pd.Series.dropna() behavior but tolerant of NaNs in
         either array.
+    forecast_horizon : int, default 21
+        Holding horizon (trading days) for the AR(1) residual forecasts.
+        ``resid_forecast`` is the single-day forecast at ~this horizon
+        (kept at ``forecast_horizon + 1`` for backward compatibility);
+        ``resid_forecast_sum`` is the expected cumulative residual over the
+        next ``forecast_horizon`` days.
 
     Returns
     -------
-    8-tuple of floats:
+    9-tuple of floats:
         (y_today, pair_beta, adf_pval, z_score_today, resid_std,
-         resid_today, resid_forecast, resid_forecasted_change)
+         resid_today, resid_forecast, resid_forecasted_change,
+         resid_forecast_sum)
     """
     y_arr = np.asarray(y_arr, dtype=float).ravel()
     x_arr = np.asarray(x_arr, dtype=float).ravel()
@@ -163,7 +196,7 @@ def create_residual_mean_reversion_features(y_arr: np.ndarray,
 
     if len(y_arr) < 3:
         nan = np.nan
-        return nan, nan, nan, nan, nan, nan, nan, nan
+        return nan, nan, nan, nan, nan, nan, nan, nan, nan
 
     x_train = x_arr[:-1]
     y_train = y_arr[:-1]
@@ -173,7 +206,7 @@ def create_residual_mean_reversion_features(y_arr: np.ndarray,
     intercept, pair_beta = _simple_ols(x_train, y_train)
     if np.isnan(pair_beta):
         nan = np.nan
-        return y_today, nan, nan, nan, nan, nan, nan, nan
+        return y_today, nan, nan, nan, nan, nan, nan, nan, nan
 
     # residuals in the window (for std & ADF)
     residuals = y_train - (intercept + pair_beta * x_train)
@@ -192,16 +225,18 @@ def create_residual_mean_reversion_features(y_arr: np.ndarray,
     except Exception:
         adf_pval = np.nan
 
-    # AR(1)-based 21-step-ahead residual forecast
+    # AR(1)-based residual forecast: single k-step-ahead level (resid_forecast,
+    # the meaningful target for price-level residuals) and the cumulative sum
+    # over the same path (resid_forecast_sum, the meaningful target for
+    # return-flow residuals). Both come from one call.
     ar1_alpha, ar1_beta = fit_ar1(residuals)
-    resid_forecast = forecast_k_steps_ar1(ar1_alpha,
-                                          ar1_beta,
-                                          resid_today,
-                                          k=21 + 1)
+    resid_forecast, resid_forecast_sum = forecast_k_steps_ar1(
+        ar1_alpha, ar1_beta, resid_today, k=forecast_horizon + 1)
     resid_forecasted_change = resid_forecast - resid_today
 
     return (y_today, float(pair_beta), adf_pval, z_score_today, std,
-            resid_today, resid_forecast, resid_forecasted_change)
+            resid_today, resid_forecast, resid_forecasted_change,
+            resid_forecast_sum)
 
 
 def fill_missing_mean_reversion_features(available_mean_reversion_features_per_ticker: dict,
@@ -260,7 +295,7 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
         needs_backfill = (
             isinstance(existing, dict)
             and 'y_today' in existing
-            and 'resid_forecast' not in existing
+            and ('resid_forecast' not in existing or 'resid_forecast_sum' not in existing)
         )
         if (date not in data) or needs_backfill:
             start = max(0, pos - lookback)
@@ -269,11 +304,11 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
             if len(y_win) < lookback + 1:
                 continue
             (y_today, beta, adf_p, z_score_today, resid_std,
-             resid_today, resid_forecast,
-             resid_forecasted_change) = create_residual_mean_reversion_features(y_win, x_win)
+             resid_today, resid_forecast, resid_forecasted_change,
+             resid_forecast_sum) = create_residual_mean_reversion_features(y_win, x_win)
 
             # Single dict allocation with all fields populated up-front is cheaper
-            # than `data[date] = {}` followed by eight `data[date][k] = v` assigns.
+            # than `data[date] = {}` followed by repeated `data[date][k] = v` assigns.
             data[date] = {
                 'y_today': y_today,
                 'beta': beta,
@@ -283,6 +318,7 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
                 'resid_today': resid_today,
                 'resid_forecast': resid_forecast,
                 'resid_forecasted_change': resid_forecasted_change,
+                'resid_forecast_sum': resid_forecast_sum,
             }
     if verbose:
         print('Data until ', p.index[-1], f'{mean_reversion_type} data created')
@@ -298,7 +334,7 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
         needs_backfill = (
             isinstance(existing, dict)
             and 'y_today' in existing
-            and 'resid_forecast' not in existing
+            and ('resid_forecast' not in existing or 'resid_forecast_sum' not in existing)
         )
         if (date not in data) or needs_backfill:
             start = max(0, pos - lookback)
@@ -308,8 +344,8 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
                 continue
 
             (y_today, beta, adf_p, z_score_today, resid_std,
-             resid_today, resid_forecast,
-             resid_forecasted_change) = create_residual_mean_reversion_features(y_win, x_win)
+             resid_today, resid_forecast, resid_forecasted_change,
+             resid_forecast_sum) = create_residual_mean_reversion_features(y_win, x_win)
 
             data[date] = {
                 'y_today': y_today,
@@ -320,6 +356,7 @@ def fill_missing_mean_reversion_features(available_mean_reversion_features_per_t
                 'resid_today': resid_today,
                 'resid_forecast': resid_forecast,
                 'resid_forecasted_change': resid_forecasted_change,
+                'resid_forecast_sum': resid_forecast_sum,
             }
     if verbose:
         print('Data until ', p.index[-1], f'{mean_reversion_type} data created')
@@ -355,6 +392,11 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
 
             # AR(1)-based 21-step-ahead residual forecast (matches ground truth notebook).
             resid_forecast = pd.Series(available_mean_reversion_features_per_ticker[ticker][f'mean_reversion_{econ_or_sector}_{return_or_price}_d{window }']).apply(lambda x: x['resid_forecast'] if isinstance(x, dict) and 'resid_forecast' in x else np.nan)
+
+            # Expected cumulative residual over the next 21 days (sum of the AR(1)
+            # forecast path). For return series this is the cumulative idiosyncratic
+            # return over the holding horizon.
+            resid_forecast_sum = pd.Series(available_mean_reversion_features_per_ticker[ticker][f'mean_reversion_{econ_or_sector}_{return_or_price}_d{window }']).apply(lambda x: x['resid_forecast_sum'] if isinstance(x, dict) and 'resid_forecast_sum' in x else np.nan)
 
             # print(adf_p)
 
@@ -393,10 +435,16 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
             # 5-day residual reversal
             res_rev_5d = resid.expanding().apply(lambda x: residual_reversal(x, length=REV_5D_LEN))
 
-            res_streak = resid.iloc[window:].expanding().apply(lambda x: residual_streak_length(x)).reindex(resid.index)
+            # Start at the first available residual to match the ground-truth loop,
+            # which seeds the incremental EMA / streak at i = window (its first
+            # residual). `resid` is built from the per-date dict and already has NO
+            # leading warmup region, so an extra `.iloc[window:]` would drop a SECOND
+            # `window` of residuals -- blanking the first `window` dates and seeding
+            # the EMA `window` rows too late (the macd_*/res_streak discrepancy).
+            res_streak = resid.expanding().apply(lambda x: residual_streak_length(x))
 
-            ema_fast = resid.iloc[window:].ewm(span=MACD_FAST, adjust=False).mean().reindex(resid.index)
-            ema_slow = resid.iloc[window:].ewm(span=MACD_SLOW, adjust=False).mean().reindex(resid.index)
+            ema_fast = resid.ewm(span=MACD_FAST, adjust=False).mean()
+            ema_slow = resid.ewm(span=MACD_SLOW, adjust=False).mean()
 
             macd_line = ema_fast - ema_slow
             macd_signal = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
@@ -439,6 +487,8 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
                 df[f'{econ_or_sector}_{r_or_p}_macd_hist_{window }'] = macd_hist/stock_price
                 # 21-step AR(1) residual forecast, price-adjusted to match ground truth notebook.
                 df[f'{econ_or_sector}_{r_or_p}_resid_forecast_{window}'] = resid_forecast / stock_price
+                # Cumulative 21-day residual forecast (less meaningful for price levels; kept for parity).
+                df[f'{econ_or_sector}_{r_or_p}_resid_forecast_sum_{window}'] = resid_forecast_sum / stock_price
             elif is_price_series == False:
 
                 D = window
@@ -468,6 +518,9 @@ def create_mean_reversion_variants(available_mean_reversion_features_per_ticker:
                 df[f'{econ_or_sector}_{r_or_p}_macd_hist_{window }'] = macd_hist
                 # 21-step AR(1) residual forecast in return-space (matches ground truth notebook).
                 df[f'{econ_or_sector}_{r_or_p}_resid_forecast_{window}'] = resid_forecast
+                # Expected cumulative idiosyncratic return over the next 21 days (the
+                # economically meaningful return-space target).
+                df[f'{econ_or_sector}_{r_or_p}_resid_forecast_sum_{window}'] = resid_forecast_sum
 
     return df
 
