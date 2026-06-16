@@ -294,6 +294,35 @@ def build_membership_timeline(years: int = 2) -> pd.DataFrame:
     return base[["Date", "sp500_tickers", "spmidcap400_tickers"]]
 
 
+def eligible_index_tickers_on_date(
+    membership_df: pd.DataFrame,
+    as_of: str | pd.Timestamp,
+) -> set[str]:
+    """
+    Return tickers in S&P 500 ∪ S&P MidCap 400 as of ``as_of``.
+
+    Uses the most recent membership snapshot on or before ``as_of`` (backward
+    as-of), matching how ``build_membership_timeline`` stores constituent lists.
+    """
+    if membership_df is None or membership_df.empty:
+        return set()
+
+    md = membership_df.copy()
+    md["Date"] = pd.to_datetime(md["Date"])
+    md = md.sort_values("Date")
+    dt = pd.to_datetime(as_of).normalize()
+
+    eligible_rows = md[md["Date"] <= dt]
+    row = eligible_rows.iloc[-1] if not eligible_rows.empty else md.iloc[0]
+
+    tickers: set[str] = set()
+    for col in ("sp500_tickers", "spmidcap400_tickers"):
+        members = row[col]
+        if isinstance(members, list):
+            tickers.update(members)
+    return tickers
+
+
 def get_all_universe_tickers(
     years: int = 2,
 ) -> tuple[list[str], list[str], list[str], pd.DataFrame]:

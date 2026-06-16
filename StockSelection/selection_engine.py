@@ -108,6 +108,7 @@ def run_experiment_single_day(
     test_date: str | pd.Timestamp,
     *,
     config: SelectionConfig | None = None,
+    membership_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     cfg = config or SelectionConfig()
     df = df_all.dropna(subset=["y"]).copy()
@@ -125,6 +126,14 @@ def run_experiment_single_day(
 
     test_df = df[df["Date"] == test_date].copy()
 
+    eligible_tickers: set[str] | None = None
+    if membership_df is not None:
+        from MetaLearner.Data.fetch_universe_tickers import eligible_index_tickers_on_date
+
+        eligible_tickers = eligible_index_tickers_on_date(membership_df, test_date)
+        train_df = train_df[train_df["Ticker"].isin(eligible_tickers)].copy()
+        test_df = test_df[test_df["Ticker"].isin(eligible_tickers)].copy()
+
     if train_df.empty or test_df.empty:
         return {
             "TEST_DATE": test_date.date(),
@@ -134,6 +143,7 @@ def run_experiment_single_day(
             "TopK mean realized return": 0.0,
             "Avg_predicted_return": 0.0,
             "Num_stock": 0,
+            "Eligible universe size": 0 if eligible_tickers is None else len(eligible_tickers),
         }
 
     feature_frame = pd.concat([train_df, test_df], axis=0).sort_values("Date").reset_index(drop=True)
@@ -217,6 +227,7 @@ def run_experiment_single_day(
         "Avg_predicted_return": topk_pred,
         "Picked rows count": int(len(selected_tickers)),
         "Num_stock": int(len(selected_tickers)),
+        "Eligible universe size": len(eligible_tickers) if eligible_tickers is not None else np.nan,
     }
 
 
@@ -224,6 +235,7 @@ def run_rolling_backtest_selection(
     df_all: pd.DataFrame,
     price_df: pd.DataFrame,
     *,
+    membership_df: pd.DataFrame | None = None,
     config: SelectionConfig | None = None,
     spacing_days: int = 11,
     lookback_windows: int = 8,
@@ -240,6 +252,7 @@ def run_rolling_backtest_selection(
     return run_selection_backtest(
         df_all=df_all,
         price_df=price_df,
+        membership_df=membership_df,
         config=cfg,
         spacing_days=spacing_days,
         lookback_windows=lookback_windows,

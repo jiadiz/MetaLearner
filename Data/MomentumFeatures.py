@@ -141,6 +141,86 @@ def create_momentum_feature_variants(
     return df
 
 
+def create_momentum_variants_for_ticker(
+    available_AR_values_per_stock: dict,
+    ticker: str,
+    lookbacks: list | None = None,
+    holddays: int = 21,
+) -> pd.DataFrame:
+    """
+    Materialize one ticker's momentum cache to a DataFrame using the column
+    names produced by data_process_script.ipynb (lag_*_hold_*_*).
+    """
+    if ticker not in available_AR_values_per_stock:
+        return pd.DataFrame()
+
+    ticker_data = available_AR_values_per_stock[ticker]
+    ticker_series = pd.DataFrame()
+
+    combos = (
+        [f"lag_{lb}_hold_{holddays}" for lb in lookbacks]
+        if lookbacks is not None
+        else list(ticker_data.keys())
+    )
+
+    for combo in combos:
+        if combo not in ticker_data:
+            continue
+        lag_time = combo.split("_")[1]
+        bucket = pd.Series(ticker_data[combo])
+
+        def _get(item, pos):
+            if isinstance(item, (list, tuple)) and len(item) > pos:
+                return item[pos]
+            return np.nan
+
+        return_series = bucket.apply(lambda x: _get(x, 0))
+        p_value_series = bucket.apply(lambda x: _get(x, 1))
+        corr_coef = bucket.apply(lambda x: _get(x, 2))
+        ret_lag = bucket.apply(lambda x: _get(x, 3))
+
+        ticker_series[f"{combo}_forecast_return"] = return_series
+        ticker_series[f"{combo}_p_value"] = p_value_series
+        ticker_series[f"{combo}_corr_coef"] = corr_coef
+        ticker_series[f"{combo}_ret_lag"] = ret_lag
+        ticker_series[f"forecast_s_times_1_minus_pval_{lag_time}"] = (
+            return_series * (1 - p_value_series)
+        )
+
+    if ticker_series.empty:
+        return pd.DataFrame()
+
+    ticker_series["Ticker"] = ticker
+    return ticker_series
+
+
+def compute_momentum_for_ticker(
+    ticker: str,
+    p: pd.Series,
+    lookbacks: list,
+    holddays: int = 21,
+    existing_ticker_data: dict = None,
+) -> tuple[str, dict, pd.DataFrame]:
+    """
+    Stateless per-ticker worker for joblib.Parallel(backend='loky').
+
+    Fills the momentum cache for one ticker, then materializes the variant
+    DataFrame. Returns (ticker, cache_slice, variants_df).
+    """
+    local: dict = {}
+    if existing_ticker_data:
+        local[ticker] = existing_ticker_data
+
+    for lookback in lookbacks:
+        fill_missing_correlation_coefficients(
+            local, p, ticker, lookback, holddays)
+
+    ticker_slice = local.get(ticker, {})
+    variants_df = create_momentum_variants_for_ticker(
+        {ticker: ticker_slice}, ticker, lookbacks, holddays)
+    return ticker, ticker_slice, variants_df
+
+
 def create_compressed_forecast_features(temp_feat_df):
     df = temp_feat_df.copy()
     

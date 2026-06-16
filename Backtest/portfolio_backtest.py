@@ -86,6 +86,7 @@ def run_selection_backtest(
     df_all: pd.DataFrame,
     price_df: pd.DataFrame,
     *,
+    membership_df: pd.DataFrame | None = None,
     config: Any = None,
     spacing_days: int = 11,
     lookback_windows: int = 8,
@@ -98,6 +99,14 @@ def run_selection_backtest(
 
     This lives in Backtest because date scheduling and experiment looping are
     backtesting orchestration concerns.
+
+    Parameters
+    ----------
+    membership_df : pd.DataFrame or None
+        Optional timeline with columns ``Date``, ``sp500_tickers``,
+        ``spmidcap400_tickers`` (as returned by ``get_all_universe_tickers``).
+        When provided, each test date trains and predicts only on tickers that
+        are members of S&P 500 or S&P MidCap 400 as of that date.
     """
     if single_day_runner is None:
         from MetaLearner.StockSelection.selection_engine import run_experiment_single_day
@@ -120,7 +129,11 @@ def run_selection_backtest(
 
     rows = []
     for dt in eval_dates:
-        rows.append(single_day_runner(frame, price, dt, config=config))
+        rows.append(
+            single_day_runner(
+                frame, price, dt, config=config, membership_df=membership_df
+            )
+        )
     return pd.DataFrame(rows)
 
 
