@@ -1,2 +1,6 @@
 Notebooks/new_pipeline_train.csv
-Notebooks/new_pipeline_deploy.csv
+Notebooks/new_pipeline_deploy.csv*.pkl
+__pycache__/
+.ipynb_checkpoints/
+**/__pycache__/
+**/.ipynb_checkpoints/
